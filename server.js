@@ -1,68 +1,66 @@
 const https = require('https');
 const http  = require('http');
+const PORT  = process.env.PORT || 3000;
 
-const FINNHUB_KEY = 'd8ceighr01qidic7k51gd8ceighr01qidic7k520';
-const PORT        = process.env.PORT || 3000;
-
-// Simple CORS-enabled proxy for Finnhub
 const server = http.createServer((req, res) => {
-
-  // CORS headers — allow any origin
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // Health check
   if (url.pathname === '/health') {
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({status:'ok', time: new Date().toISOString()}));
     return;
   }
 
-  // /quote?symbol=SPY
-  if (url.pathname === '/quote') {
-    const symbol = url.searchParams.get('symbol');
-    if (!symbol) { res.writeHead(400); res.end('Missing symbol'); return; }
-    finnhubGet(`/quote?symbol=${symbol}`, res);
+  // /stock?symbol=SPY  — returns quote + 5min bars combined
+  if (url.pathname === '/stock') {
+    const symbol = (url.searchParams.get('symbol') || '').toUpperCase();
+    if (!symbol) { res.writeHead(400); res.end(JSON.stringify({error:'Missing symbol'})); return; }
+
+    const yahooUrl = `/v8/finance/chart/${symbol}?interval=5m&range=1d&includePrePost=false`;
+    yahooGet(yahooUrl, (err, data) => {
+      if (err) {
+        res.writeHead(502, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({error: err.message}));
+        return;
+      }
+      res.writeHead(200, {'Content-Type':'application/json'});
+      res.end(data);
+    });
     return;
   }
 
-  // /candles?symbol=SPY&from=1234567890&to=1234567890
-  if (url.pathname === '/candles') {
-    const symbol = url.searchParams.get('symbol');
-    const from   = url.searchParams.get('from');
-    const to     = url.searchParams.get('to');
-    if (!symbol || !from || !to) { res.writeHead(400); res.end('Missing params'); return; }
-    finnhubGet(`/stock/candle?symbol=${symbol}&resolution=5&from=${from}&to=${to}`, res);
-    return;
-  }
-
-  res.writeHead(404); res.end('Not found');
+  res.writeHead(404); res.end(JSON.stringify({error:'Not found'}));
 });
 
-function finnhubGet(path, res) {
+function yahooGet(path, cb) {
   const options = {
-    hostname: 'finnhub.io',
-    path:     `/api/v1${path}&token=${FINNHUB_KEY}`,
-    method:   'GET',
-    headers:  { 'User-Agent': 'trading-dashboard/1.0' }
+    hostname: 'query1.finance.yahoo.com',
+    path,
+    method:  'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; trading-dashboard/1.0)',
+      'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+    }
   };
   const req = https.request(options, (r) => {
     let data = '';
     r.on('data', chunk => data += chunk);
     r.on('end', () => {
-      res.writeHead(r.statusCode, {'Content-Type':'application/json'});
-      res.end(data);
+      if (r.statusCode !== 200) {
+        cb(new Error(`Yahoo HTTP ${r.statusCode}`));
+      } else {
+        cb(null, data);
+      }
     });
   });
-  req.on('error', (e) => {
-    res.writeHead(500, {'Content-Type':'application/json'});
-    res.end(JSON.stringify({error: e.message}));
-  });
+  req.on('error', e => cb(e));
+  req.setTimeout(8000, () => { req.destroy(); cb(new Error('Timeout')); });
   req.end();
 }
 
